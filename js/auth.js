@@ -7,8 +7,8 @@ import {
 import { auth } from "./config.js";
 import { listenCategories } from "./categoriesUI.js";
 import { listenWorks } from "./worksUI.js";
-import { listenNews } from "./newsUI.js";
 import { listenStatistics } from "./statisticsUI.js";
+import { listenSiteContent } from "./siteContentUI.js";
 
 const loginScreen = document.getElementById("login-screen");
 const dashboard = document.getElementById("dashboard");
@@ -65,7 +65,7 @@ onAuthStateChanged(auth, (user) => {
     dashboard.style.display = "block";
     logoutBtn.style.display = "inline-block";
     stopListeners(); // أمان: ما نخلي اشتراكات قديمة تتراكم فوق الجديدة
-    unsubscribers = [listenCategories(), listenWorks(), listenNews(), listenStatistics()];
+    unsubscribers = [listenCategories(), listenWorks(), listenStatistics(), listenSiteContent()];
   } else {
     stopListeners();
     loginScreen.style.display = "block";
