@@ -2,7 +2,7 @@
 // البيانات بتتخزن في Firestore → collection: siteContent
 //   doc "why"   => { eyebrow, title, text, cards: [{ icon, title, text }] }
 //   doc "about" => { title, text1, text2 }
-// (الإحصائيات مستقلة تمامًا وبتتعدّل من تبويب "الإحصائيات")
+// (الإحصائيات collection مستقلة، بس واجهتها صارت بنفس هالتبويب تحت "هويتنا")
 import { saveSiteDoc, subscribeToSiteDoc } from "./services/siteContentService.js";
 
 // ---------- القيم الافتراضية (نفس النصوص اللي في الموقع لو ما في بيانات محفوظة) ----------

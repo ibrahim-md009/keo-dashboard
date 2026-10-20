@@ -1,6 +1,8 @@
 import { createWork, updateWork, deleteWork, subscribeToWorks } from "./services/worksService.js";
 import { uploadOneToCloudinary, uploadManyToCloudinary } from "./image-upload.js";
-import { thumbUrl, mediumUrl } from "./imageUrl.js";
+import { thumbUrl, mediumUrl, videoPosterUrl } from "./imageUrl.js";
+import { uploadVideoToCloudinary, validateVideoFile } from "./videoUpload.js";
+import { parseYouTubeId } from "./youtube.js";
 import { categorySelect } from "./categoriesUI.js";
 import {
   showUploadOverlay,
@@ -15,6 +17,8 @@ const worksFileInput = document.getElementById("works-file");
 const worksPreview = document.getElementById("works-preview");
 const worksSubFilesInput = document.getElementById("works-sub-files"); // جديد: <input type="file" multiple>
 const worksSubPreview = document.getElementById("works-sub-preview"); // جديد: div للمعاينة
+const worksVideoFilesInput = document.getElementById("works-video-files"); // رفع فيديو مباشر
+const worksFeaturedInput = document.getElementById("works-featured"); // النجمة: عمل مميز
 const worksVideoInput = document.getElementById("works-video-url"); // جديد: خانة لصق رابط يوتيوب
 const worksVideoAddBtn = document.getElementById("works-video-add"); // جديد: زر إضافة الفيديو
 const worksVideoList = document.getElementById("works-video-list"); // جديد: قائمة الفيديوهات المضافة
@@ -29,7 +33,8 @@ let editingWorkImage = null;
 let worksPreviewObjectUrl = null;
 let worksSubExistingUrls = [];
 let worksSubNewFiles = [];
-let worksVideos = []; // [{ type: "youtube", id }]
+// عناصر الفيديو: { type: "youtube", id } | { type: "cloudinary", url } | { type: "pending", file, progress, error, upload }
+let worksVideos = [];
 
 // === Object URLs للصور الفرعية: رابط واحد لكل ملف + تحريره عند عدم الحاجة ===
 const objectUrls = new Map();
@@ -89,32 +94,10 @@ function renderWorksSubPreview() {
 }
 
 // === YouTube videos ===
-// يقبل: watch?v= / youtu.be / shorts / embed / live / أو الـ ID نفسه (11 حرف)
-function parseYouTubeId(input) {
-  const s = input.trim();
-  const isId = (x) => /^[\w-]{11}$/.test(x || "");
-  if (isId(s)) return s;
-  try {
-    const u = new URL(s);
-    const host = u.hostname.replace(/^(www|m)\./, "");
-    if (host === "youtu.be") {
-      const id = u.pathname.slice(1).split("/")[0];
-      return isId(id) ? id : null;
-    }
-    if (host === "youtube.com" || host === "youtube-nocookie.com") {
-      if (u.pathname === "/watch") {
-        const id = u.searchParams.get("v");
-        return isId(id) ? id : null;
-      }
-      const m = u.pathname.match(/^\/(?:shorts|embed|live|v)\/([\w-]{11})/);
-      if (m) return m[1];
-    }
-  } catch {
-    /* مش رابط */
-  }
-  return null;
-}
+const readyVideos = () => worksVideos.filter((v) => v.type !== "pending");
+const pendingVideos = () => worksVideos.filter((v) => v.type === "pending" && !v.error);
 
+// نرسم القائمة مرة وحدة؛ تقدم الرفع بيتحدّث على عنصر الشريط فقط (بدون إعادة رسم) عشان ما نثقّل الصفحة
 function renderWorksVideos() {
   worksVideoList.innerHTML = "";
   if (worksVideos.length === 0) return;
@@ -124,16 +107,67 @@ function renderWorksVideos() {
   badge.textContent = `${worksVideos.length} فيديو`;
   worksVideoList.appendChild(badge);
 
-  worksVideos.forEach((v, idx) => {
+  worksVideos.forEach((v) => {
     const wrap = document.createElement("div");
-    wrap.className = "thumb-wrap";
-    wrap.innerHTML = `<img src="https://img.youtube.com/vi/${v.id}/mqdefault.jpg" alt="" loading="lazy" decoding="async"><button type="button" class="remove-x">✕</button>`;
+    wrap.className = "video-tile" + (v.error ? " is-error" : "");
+    let thumb = "";
+    let meta = "";
+    if (v.type === "youtube") {
+      thumb = `<img src="https://img.youtube.com/vi/${v.id}/mqdefault.jpg" alt="" loading="lazy" decoding="async"><span>▶</span>`;
+      meta = `<span class="vt-name">يوتيوب</span>`;
+    } else if (v.type === "cloudinary") {
+      thumb = `<img src="${videoPosterUrl(v.url)}" alt="" loading="lazy" decoding="async" onerror="this.remove()"><span>▶</span>`;
+      meta = `<span class="vt-name">تم الرفع ✔</span>`;
+    } else {
+      thumb = `<span>🎬</span>`;
+      meta = `<span class="vt-name">${v.error ? v.error : v.file.name}</span>${
+        v.error ? "" : '<div class="vt-bar"><i></i></div>'
+      }`;
+    }
+    wrap.innerHTML = `<div class="vt-thumb">${thumb}</div><div class="vt-meta">${meta}</div><button type="button" class="remove-x">✕</button>`;
+    if (v.type === "pending") {
+      v.barEl = wrap.querySelector(".vt-bar i");
+      if (v.barEl) v.barEl.style.width = (v.progress || 0) + "%";
+    }
     wrap.querySelector(".remove-x").addEventListener("click", () => {
-      worksVideos.splice(idx, 1);
+      if (v.type === "pending") v.upload?.cancel();
+      worksVideos = worksVideos.filter((x) => x !== v);
       renderWorksVideos();
     });
     worksVideoList.appendChild(wrap);
   });
+}
+
+// بيبدأ رفع الفيديو فوراً بالخلفية، ولما يخلص بيتحوّل العنصر لرابط محفوظ
+function queueVideoFiles(files) {
+  const statusEl = document.getElementById("works-upload-status");
+  statusEl.textContent = "";
+  files.forEach((file) => {
+    const err = validateVideoFile(file);
+    if (err) {
+      statusEl.textContent = err;
+      return;
+    }
+    const item = { type: "pending", file, progress: 0, error: null, upload: null, done: null };
+    item.upload = uploadVideoToCloudinary(file, (pct) => {
+      item.progress = pct;
+      if (item.barEl) item.barEl.style.width = pct + "%";
+    });
+    item.done = item.upload.promise.then(
+      (url) => {
+        const i = worksVideos.indexOf(item);
+        if (i !== -1) worksVideos[i] = { type: "cloudinary", url };
+        renderWorksVideos();
+      },
+      (e) => {
+        if (e.message === "cancelled") return;
+        item.error = "فشل الرفع";
+        renderWorksVideos();
+      },
+    );
+    worksVideos.push(item);
+  });
+  renderWorksVideos();
 }
 
 // بترجّع true لو الخانة فاضية أو الرابط اتضاف، و false لو الرابط غلط
@@ -146,7 +180,7 @@ function addVideoFromInput() {
     statusEl.textContent = "رابط يوتيوب غير صحيح";
     return false;
   }
-  if (!worksVideos.some((v) => v.id === id)) worksVideos.push({ type: "youtube", id });
+  if (!worksVideos.some((v) => v.type === "youtube" && v.id === id)) worksVideos.push({ type: "youtube", id });
   worksVideoInput.value = "";
   statusEl.textContent = "";
   renderWorksVideos();
@@ -176,6 +210,20 @@ worksSubFilesInput.addEventListener("change", (e) => {
   renderWorksSubPreview();
 });
 
+worksVideoFilesInput.addEventListener("change", (e) => {
+  const files = Array.from(e.target.files);
+  worksVideoFilesInput.value = "";
+  queueVideoFiles(files);
+});
+
+// تنبيه لو حاول يسكّر الصفحة والفيديو لسا بيترفع
+window.addEventListener("beforeunload", (e) => {
+  if (pendingVideos().length) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
+
 worksVideoAddBtn.addEventListener("click", addVideoFromInput);
 // Enter داخل خانة الرابط يضيف الفيديو بدل ما يرسل الفورم
 worksVideoInput.addEventListener("keydown", (e) => {
@@ -200,6 +248,11 @@ worksForm.addEventListener("submit", async (e) => {
   // لو لزق رابط ونسي يضغط "إضافة" نضيفه تلقائياً (ولو الرابط غلط نوقف)
   if (!addVideoFromInput()) return;
 
+  if (worksVideos.some((v) => v.type === "pending" && v.error)) {
+    statusEl.textContent = "في فيديو فشل رفعه — احذفه أو أعد رفعه";
+    return;
+  }
+
   worksSubmitBtn.disabled = true;
   worksSubmitBtn.textContent = editingWorkId ? "جاري الحفظ..." : "جاري الإضافة...";
   showUploadOverlay(file ? "جاري رفع الصورة..." : "جاري الحفظ...");
@@ -218,12 +271,20 @@ worksForm.addEventListener("submit", async (e) => {
     const newSubUrls = await uploadManyToCloudinary(worksSubNewFiles, statusEl);
     const subImages = [...worksSubExistingUrls, ...newSubUrls];
 
+    // لو في فيديو لسا بيترفع نستناه (غالباً خلص أثناء ما كان يعبي الفورم)
+    if (pendingVideos().length) {
+      setUploadOverlayText("جاري إكمال رفع الفيديو...");
+      await Promise.all(pendingVideos().map((v) => v.done));
+    }
+    if (worksVideos.some((v) => v.type === "pending")) throw new Error("video upload failed");
+
     setUploadOverlayText("جاري الحفظ...");
 
     const payload = {
       img: imgUrl,
       subImages,
-      videos: worksVideos,
+      videos: readyVideos(),
+      featured: worksFeaturedInput.checked,
       category: categorySelect.value,
       title: document.getElementById("works-main").value.trim(),
       sub: document.getElementById("works-sub").value.trim(),
@@ -268,15 +329,17 @@ export function listenWorks() {
         <img src="${thumbUrl(item.img)}" alt="" loading="lazy" decoding="async" width="68" height="68">
         <div class="item-info">
           <span class="tag">${item.category || ""}</span>
-          <p class="main">${item.title || ""}</p>
+          <p class="main">${item.featured ? '<span class="featured-badge" title="عمل مميز">★</span> ' : ""}${item.title || ""}</p>
           <p class="sub">${item.sub || ""}</p>
           ${subCount ? `<p class="sub">${subCount + 1} ملفات</p>` : ""}
         </div>
         <div class="item-actions">
+          <button class="star ${item.featured ? "on" : ""}" title="${item.featured ? "إزالة من الأعمال المميزة" : "إضافة للأعمال المميزة"}" aria-label="عمل مميز">${item.featured ? "★" : "☆"}</button>
           <button class="edit">تعديل</button>
           <button class="del">حذف</button>
         </div>`;
 
+      row.querySelector(".star").addEventListener("click", () => updateWork(item.id, { featured: !item.featured }));
       row.querySelector(".edit").addEventListener("click", () => startEditWork(item.id, item));
       row.querySelector(".del").addEventListener("click", async () => {
         if (confirm("متأكد بدك تحذف هالعنصر؟")) {
@@ -296,7 +359,9 @@ function startEditWork(id, item) {
   editingWorkImage = item.img || null;
   worksSubExistingUrls = [...(item.subImages || [])];
   worksSubNewFiles = [];
-  worksVideos = [...(item.videos || [])];
+  worksVideos.forEach((v) => v.type === "pending" && v.upload?.cancel());
+  worksVideos = [...(item.videos || [])].map((v) => (v.url ? { type: "cloudinary", url: v.url } : v));
+  worksFeaturedInput.checked = !!item.featured;
   worksFileInput.required = false;
   worksFileInput.value = "";
   if (editingWorkImage) {
@@ -321,6 +386,7 @@ function resetWorksForm() {
   editingWorkImage = null;
   worksSubExistingUrls = [];
   worksSubNewFiles = [];
+  worksVideos.forEach((v) => v.type === "pending" && v.upload?.cancel());
   worksVideos = [];
   worksForm.reset();
   worksVideoList.innerHTML = "";

@@ -18,3 +18,12 @@ export function mediumUrl(url, width = 800) {
     `$1c_limit,w_${width},q_auto,f_auto/$2`,
   );
 }
+
+// ====== الفيديو (Cloudinary) ======
+// صورة غلاف خفيفة من أول لقطة بالفيديو (للمعاينة بالداشبورد)
+export function videoPosterUrl(url, width = 320) {
+  if (!url || typeof url !== "string") return url;
+  return url
+    .replace(/(res\.cloudinary\.com\/[^/]+\/video\/upload\/)(v\d+\/)/, `$1so_0,c_limit,w_${width},q_auto,f_jpg/$2`)
+    .replace(/\.[a-z0-9]+(\?.*)?$/i, ".jpg");
+}
