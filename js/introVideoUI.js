@@ -4,7 +4,7 @@
 //   videoUrl = فيديو مرفوع على Cloudinary، videoId = يوتيوب (اختياري)، وكلاهما فاضي = القسم مخفي في الموقع
 import { saveSiteDoc, subscribeToSiteDoc } from "./services/siteContentService.js";
 import { parseYouTubeId } from "./youtube.js";
-import { uploadVideoToCloudinary, validateVideoFile } from "./videoUpload.js";
+import { uploadVideoToCloudinary, validateVideoFile } from "./services/videoUpload.js";
 import { videoPosterUrl } from "./imageUrl.js";
 
 const $ = (id) => document.getElementById(id);

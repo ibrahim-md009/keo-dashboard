@@ -1,6 +1,8 @@
 import { createNews, updateNews, deleteNews, subscribeToNews } from "./services/newsService.js";
-import { uploadOneToCloudinary, uploadManyToCloudinary } from "./image-upload.js";
-import { thumbUrl, mediumUrl } from "./imageUrl.js";
+import { uploadOneToCloudinary, uploadManyToCloudinary } from "./services/imageUpload.js";
+import { thumbUrl, mediumUrl, videoPosterUrl } from "./imageUrl.js";
+import { uploadVideoToCloudinary, validateVideoFile } from "./services/videoUpload.js";
+import { parseYouTubeId } from "./youtube.js";
 import {
   showUploadOverlay,
   setUploadOverlayText,
@@ -14,6 +16,10 @@ const newsMainFileInput = document.getElementById("news-main-file");
 const newsMainPreviewWrap = document.getElementById("news-main-preview-wrap");
 const newsSubFilesInput = document.getElementById("news-sub-files");
 const newsSubPreview = document.getElementById("news-sub-preview");
+const newsVideoFilesInput = document.getElementById("news-video-files"); // رفع فيديو مباشر
+const newsVideoInput = document.getElementById("news-video-url"); // خانة لصق رابط يوتيوب
+const newsVideoAddBtn = document.getElementById("news-video-add");
+const newsVideoList = document.getElementById("news-video-list"); // قائمة الفيديوهات المضافة
 const newsSubmitBtn = document.getElementById("news-submit-btn");
 const newsCancelBtn = document.getElementById("news-cancel-btn");
 const newsFormTitle = document.getElementById("news-form-title");
@@ -25,6 +31,12 @@ let newsMainExistingUrl = null;
 let newsMainNewFile = null;
 let newsSubExistingUrls = [];
 let newsSubNewFiles = [];
+// عناصر الفيديو (نفس شكل الأعمال): { type: "youtube", id } | { type: "cloudinary", url } | { type: "pending", file, progress, error, upload }
+let newsVideos = [];
+
+// الأخبار بتنعرض بـ innerHTML، فنهرّب النصوص عشان أي رمز < أو " ما يخرّب القائمة
+const esc = (str) =>
+  String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 // === Object URLs: رابط واحد لكل ملف + تحريره لما ما نحتاجه (كان بيتولّد رابط جديد بكل رسم وما بيتحرر) ===
 const objectUrls = new Map();
@@ -101,6 +113,100 @@ function renderNewsSubPreview() {
   });
 }
 
+// === Videos (يوتيوب + رفع مباشر) ===
+const readyVideos = () => newsVideos.filter((v) => v.type !== "pending");
+const pendingVideos = () => newsVideos.filter((v) => v.type === "pending" && !v.error);
+
+// نرسم القائمة مرة وحدة؛ تقدم الرفع بيتحدّث على عنصر الشريط فقط (بدون إعادة رسم)
+function renderNewsVideos() {
+  newsVideoList.innerHTML = "";
+  if (newsVideos.length === 0) return;
+
+  const badge = document.createElement("div");
+  badge.className = "count-badge";
+  badge.textContent = `${newsVideos.length} فيديو`;
+  newsVideoList.appendChild(badge);
+
+  newsVideos.forEach((v) => {
+    const wrap = document.createElement("div");
+    wrap.className = "video-tile" + (v.error ? " is-error" : "");
+    let thumb = "";
+    let meta = "";
+    if (v.type === "youtube") {
+      thumb = `<img src="https://img.youtube.com/vi/${esc(v.id)}/mqdefault.jpg" alt="" loading="lazy" decoding="async"><span>▶</span>`;
+      meta = `<span class="vt-name">يوتيوب</span>`;
+    } else if (v.type === "cloudinary") {
+      thumb = `<img src="${esc(videoPosterUrl(v.url))}" alt="" loading="lazy" decoding="async" onerror="this.remove()"><span>▶</span>`;
+      meta = `<span class="vt-name">تم الرفع ✔</span>`;
+    } else {
+      thumb = `<span>🎬</span>`;
+      meta = `<span class="vt-name">${v.error ? esc(v.error) : esc(v.file.name)}</span>${
+        v.error ? "" : '<div class="vt-bar"><i></i></div>'
+      }`;
+    }
+    wrap.innerHTML = `<div class="vt-thumb">${thumb}</div><div class="vt-meta">${meta}</div><button type="button" class="remove-x">✕</button>`;
+    if (v.type === "pending") {
+      v.barEl = wrap.querySelector(".vt-bar i");
+      if (v.barEl) v.barEl.style.width = (v.progress || 0) + "%";
+    }
+    wrap.querySelector(".remove-x").addEventListener("click", () => {
+      if (v.type === "pending") v.upload?.cancel();
+      newsVideos = newsVideos.filter((x) => x !== v);
+      renderNewsVideos();
+    });
+    newsVideoList.appendChild(wrap);
+  });
+}
+
+// بيبدأ رفع الفيديو فوراً بالخلفية، ولما يخلص بيتحوّل العنصر لرابط محفوظ
+function queueVideoFiles(files) {
+  const statusEl = document.getElementById("news-upload-status");
+  statusEl.textContent = "";
+  files.forEach((file) => {
+    const err = validateVideoFile(file);
+    if (err) {
+      statusEl.textContent = err;
+      return;
+    }
+    const item = { type: "pending", file, progress: 0, error: null, upload: null, done: null };
+    item.upload = uploadVideoToCloudinary(file, (pct) => {
+      item.progress = pct;
+      if (item.barEl) item.barEl.style.width = pct + "%";
+    });
+    item.done = item.upload.promise.then(
+      (url) => {
+        const i = newsVideos.indexOf(item);
+        if (i !== -1) newsVideos[i] = { type: "cloudinary", url };
+        renderNewsVideos();
+      },
+      (e) => {
+        if (e.message === "cancelled") return;
+        item.error = "فشل الرفع";
+        renderNewsVideos();
+      },
+    );
+    newsVideos.push(item);
+  });
+  renderNewsVideos();
+}
+
+// بترجّع true لو الخانة فاضية أو الرابط اتضاف، و false لو الرابط غلط
+function addVideoFromInput() {
+  const statusEl = document.getElementById("news-upload-status");
+  const raw = newsVideoInput.value.trim();
+  if (!raw) return true;
+  const id = parseYouTubeId(raw);
+  if (!id) {
+    statusEl.textContent = "رابط يوتيوب غير صحيح";
+    return false;
+  }
+  if (!newsVideos.some((v) => v.type === "youtube" && v.id === id)) newsVideos.push({ type: "youtube", id });
+  newsVideoInput.value = "";
+  statusEl.textContent = "";
+  renderNewsVideos();
+  return true;
+}
+
 // === Event Listeners ===
 newsMainFileInput.addEventListener("change", (e) => {
   const file = e.target.files[0];
@@ -118,11 +224,42 @@ newsSubFilesInput.addEventListener("change", (e) => {
   renderNewsSubPreview();
 });
 
+newsVideoFilesInput.addEventListener("change", (e) => {
+  const files = Array.from(e.target.files);
+  newsVideoFilesInput.value = "";
+  queueVideoFiles(files);
+});
+
+// تنبيه لو حاول يسكّر الصفحة والفيديو لسا بيترفع
+window.addEventListener("beforeunload", (e) => {
+  if (pendingVideos().length) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
+
+newsVideoAddBtn.addEventListener("click", addVideoFromInput);
+// Enter داخل خانة الرابط يضيف الفيديو بدل ما يرسل الفورم
+newsVideoInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    addVideoFromInput();
+  }
+});
+
 newsCancelBtn.addEventListener("click", resetNewsForm);
 
 newsForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const statusEl = document.getElementById("news-upload-status");
+
+  // لو لزق رابط ونسي يضغط "إضافة" نضيفه تلقائياً (ولو الرابط غلط نوقف)
+  if (!addVideoFromInput()) return;
+
+  if (newsVideos.some((v) => v.type === "pending" && v.error)) {
+    statusEl.textContent = "في فيديو فشل رفعه — احذفه أو أعد رفعه";
+    return;
+  }
 
   newsSubmitBtn.disabled = true;
   newsSubmitBtn.textContent = editingNewsId ? "جاري الحفظ..." : "جاري النشر...";
@@ -142,11 +279,19 @@ newsForm.addEventListener("submit", async (e) => {
     const newSubUrls = await uploadManyToCloudinary(newsSubNewFiles, statusEl);
     const subImages = [...newsSubExistingUrls, ...newSubUrls];
 
+    // لو في فيديو لسا بيترفع نستناه (غالباً خلص أثناء ما كان يعبي الفورم)
+    if (pendingVideos().length) {
+      setUploadOverlayText("جاري إكمال رفع الفيديو...");
+      await Promise.all(pendingVideos().map((v) => v.done));
+    }
+    if (newsVideos.some((v) => v.type === "pending")) throw new Error("video upload failed");
+
     setUploadOverlayText("جاري الحفظ...");
 
     const payload = {
       mainImage: mainImage || null,
       subImages,
+      videos: readyVideos(),
       mainDesc: document.getElementById("news-main").value.trim(),
       subDesc: document.getElementById("news-sub").value.trim(),
     };
@@ -191,6 +336,7 @@ export function listenNews() {
       const subImagesHtml = subImages
         .map((url) => `<img src="${thumbUrl(url)}" alt="" loading="lazy" decoding="async" width="68" height="68">`)
         .join("");
+      const videoCount = (item.videos || []).length;
 
       const row = document.createElement("div");
       row.className = "item";
@@ -200,8 +346,9 @@ export function listenNews() {
           ${subImagesHtml}
         </div>
         <div class="item-info">
-          <p class="main">${item.mainDesc || "(بدون عنوان)"}</p>
-          <p class="sub">${item.subDesc || ""}</p>
+          <p class="main">${esc(item.mainDesc) || "(بدون عنوان)"}</p>
+          <p class="sub">${esc(item.subDesc)}</p>
+          ${videoCount ? `<p class="sub">🎬 ${videoCount} فيديو</p>` : ""}
         </div>
         <div class="item-actions">
           <button class="edit">تعديل</button>
@@ -228,9 +375,12 @@ function startEditNews(id, item) {
   newsMainNewFile = null;
   newsSubExistingUrls = [...(item.subImages || item.images || [])];
   newsSubNewFiles = [];
+  newsVideos.forEach((v) => v.type === "pending" && v.upload?.cancel());
+  newsVideos = (item.videos || []).map((v) => (v.url ? { type: "cloudinary", url: v.url } : v));
 
   renderNewsMainPreview();
   renderNewsSubPreview();
+  renderNewsVideos();
 
   document.getElementById("news-main").value = item.mainDesc || "";
   document.getElementById("news-sub").value = item.subDesc || "";
@@ -249,7 +399,10 @@ function resetNewsForm() {
   newsMainNewFile = null;
   newsSubExistingUrls = [];
   newsSubNewFiles = [];
+  newsVideos.forEach((v) => v.type === "pending" && v.upload?.cancel());
+  newsVideos = [];
   newsForm.reset();
+  newsVideoList.innerHTML = "";
   newsMainPreviewWrap.innerHTML = "";
   newsSubPreview.innerHTML = "";
   newsSubmitBtn.textContent = "نشر الخبر";

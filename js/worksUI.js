@@ -1,7 +1,7 @@
 import { createWork, updateWork, deleteWork, subscribeToWorks } from "./services/worksService.js";
-import { uploadOneToCloudinary, uploadManyToCloudinary } from "./image-upload.js";
+import { uploadOneToCloudinary, uploadManyToCloudinary } from "./services/imageUpload.js";
 import { thumbUrl, mediumUrl, videoPosterUrl } from "./imageUrl.js";
-import { uploadVideoToCloudinary, validateVideoFile } from "./videoUpload.js";
+import { uploadVideoToCloudinary, validateVideoFile } from "./services/videoUpload.js";
 import { parseYouTubeId } from "./youtube.js";
 import { categorySelect } from "./categoriesUI.js";
 import {
